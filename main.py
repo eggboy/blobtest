@@ -1,52 +1,71 @@
-from azure.storage.blob import BlobServiceClient
-import os
-from timeit import default_timer as timer
-from flask import Flask
-from flask_restful import Resource, Api
+import concurrent
+from itertools import islice
 from multiprocessing import Pool
 
-app = Flask(__name__)
-api = Api(app)
+from azure.storage.blob import BlobServiceClient
+from timeit import default_timer as timer
+from environs import Env
+import logging
 
-connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-parallism = 5
+handler = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+logger.setLevel(logging.DEBUG)
 
-@app.route('/file/<filename>')
-def home(filename):
-    images_list = []
-    i = 0
+env = Env()
 
-    while i <= parallism:
-        i += 1
-        images_list.append(filename)
+with env.prefixed("DOWNLOADER_"):
+    imputCSV = env("INPUT_CSV", "file_list.csv")
+    Workers = env.int("WORKERS", 5)
+    Rounds = env.int("ROUNDS", 1)
+    DiscardHeader = 1 if env.bool("DISCARD_HEADER", True) == True else 0
+    ConnectionString = env("CONNECTION_STRING", "")
 
-    with Pool(parallism) as p:
-        mbs = p.map(download_image, images_list)
+storageAccount = "microsoft"
+print(f"CONNECTION_STRING : {ConnectionString}")
+blob_service_client = BlobServiceClient.from_connection_string(ConnectionString)
+container_client = blob_service_client.get_container_client(storageAccount)
 
-    total = 0
-    for i in mbs:
-        total += i
-    return str(total)
-
-
-def download_image(filename):
-    print("Downloading " + filename)
-
-    blob_service_client = BlobServiceClient.from_connection_string(
-        connection_string)
-    container_client = blob_service_client.get_container_client("grabtest")
-    blob_client = container_client.get_blob_client(filename)
+def download_image(filePath):
+    # filePath = filePath.replace("azure:", "")
+    # filePathSplit = filePath.split("/", 1)
+    storageAccount = "microsoft"
+    # path = filePathSplit[1]
+    path = filePath
+    blob_client = container_client.get_blob_client(path)
 
     start = timer()
+    #logger.info("Downloading " + path)
     download_stream = blob_client.download_blob()
-    print(str(download_stream.size))
+    logger.info(str(download_stream.size))
     end = timer()
-    print("Elapsed Time : " + str(end - start))
+    elapsed_time = (end - start)
+    logger.info("Elapsed Time : " + str(elapsed_time))
 
-    return (download_stream.size/1024/1024) / (end - start)
-    # print("Elapsed Time : " + str(end - start) + " Download Size : " + str(download_stream.size / 1024 / 1024))
+    return download_stream.size
 
+if __name__ == "__main__":
+    futures = []
+    logger.info("Starting...")
 
-if __name__ == '__main__':
-    app.run(debug=True)
+    fileList = open(imputCSV, "r").readlines()
+    list = []
+    for file in islice(fileList, DiscardHeader, None):
+        file = file.replace("\n", "").replace("\r", "")
+        list.append(file)
+    start = timer()
+    with Pool(Workers) as p:
+        mbs = p.map(download_image, list)
+    p.close()
+    p.join()
+    end = timer()
+    elapsed_time = (end - start)
+    totalBytes = 0
+
+    for i in mbs:
+        totalBytes += i
+    print(f"totalBytes : {totalBytes}, totalSeconds : {elapsed_time}")
